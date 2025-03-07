@@ -1,9 +1,10 @@
-from __future__ import print_function
-import datetime
-from ultralytics import YOLO
-import cv2
 import numpy as np
 from filterpy.kalman import KalmanFilter
+import yaml
+
+with open("tracker_config.yml", "r") as f:
+    config = yaml.safe_load(f)
+
 
 def linear_assignment(cost_matrix):
     try:
@@ -74,18 +75,16 @@ class KalmanBoxTracker(object):
         Initialises a tracker using initial bounding box.
         """
         # define constant velocity model
-        self.kf = KalmanFilter(dim_x=7, dim_z=4)
-        self.kf.F = np.array(
-            [[1, 0, 0, 0, 1, 0, 0], [0, 1, 0, 0, 0, 1, 0], [0, 0, 1, 0, 0, 0, 1], [0, 0, 0, 1, 0, 0, 0],
-             [0, 0, 0, 0, 1, 0, 0], [0, 0, 0, 0, 0, 1, 0], [0, 0, 0, 0, 0, 0, 1]])
-        self.kf.H = np.array(
-            [[1, 0, 0, 0, 0, 0, 0], [0, 1, 0, 0, 0, 0, 0], [0, 0, 1, 0, 0, 0, 0], [0, 0, 0, 1, 0, 0, 0]])
+        self.kf = KalmanFilter(dim_x=config["param_tracker"]["dim_x"], dim_z=config["param_tracker"]["dim_z"])
+        self.kf.F = np.array(config["param_tracker"]["F"])
+        self.kf.H = np.array(config["param_tracker"]["H"])
 
-        self.kf.R[2:, 2:] *= 10.
-        self.kf.P[4:, 4:] *= 1000.  # give high uncertainty to the unobservable initial velocities
-        self.kf.P *= 10.
-        self.kf.Q[-1, -1] *= 0.01
-        self.kf.Q[4:, 4:] *= 0.01
+        self.kf.R[2:, 2:] *= config["param_tracker"]["R"]
+        self.kf.P[4:, 4:] *= \
+            config["param_tracker"]["P1"]  # give high uncertainty to the unobservable initial velocities
+        self.kf.P *= config["param_tracker"]["P2"]
+        self.kf.Q[-1, -1] *= config["param_tracker"]["Q1"]
+        self.kf.Q[4:, 4:] *= config["param_tracker"]["Q2"]
 
         self.kf.x[:4] = convert_bbox_to_z(bbox)
         self.time_since_update = 0
@@ -173,7 +172,8 @@ def associate_detections_to_trackers(detections, trackers, iou_threshold=0.3):
 
 
 class Sort(object):
-    def __init__(self, max_age=1, min_hits=3, iou_threshold=0.3):
+    def __init__(self, max_age=config["param_sort"]["max_age"], min_hits=config["param_sort"]["min_hits"],
+                 iou_threshold=config["param_sort"]["iou_threshold"]):
         """
         Sets key parameters for SORT
         """
@@ -229,99 +229,103 @@ class Sort(object):
         return np.empty((0, 5))
 
 
-# define some constants
-CONFIDENCE_THRESHOLD = 0.8
-GREEN = (0, 255, 0)
-WHITE = (255, 255, 255)
+if __name__ == "__main__":
 
-# initialize the video capture object
-video_path = "people_walking.mp4"
-video_cap = cv2.VideoCapture(video_path)
+    import datetime
+    from ultralytics import YOLO
+    import cv2
 
-# initialize the video writer object
-framesize = (int(1280), int(720))
-fourcc = cv2.VideoWriter.fourcc(*'XVID')
-writer = cv2.VideoWriter(f"video.avi", fourcc, 30.0, framesize, isColor=True)
+    # define some constants
+    CONFIDENCE_THRESHOLD = 0.8
+    GREEN = (0, 255, 0)
+    WHITE = (255, 255, 255)
 
-# load the pre-trained YOLOv8n model
-model = YOLO("yolo11x.pt")
+    # initialize the video capture object
+    video_path = "people_walking.mp4"
+    video_cap = cv2.VideoCapture(video_path)
 
-mot_tracker = Sort(max_age=500, min_hits=3, iou_threshold=0.7)
+    # initialize the video writer object
+    framesize = (int(1280), int(720))
+    fourcc = cv2.VideoWriter.fourcc(*'XVID')
+    writer = cv2.VideoWriter(f"video.avi", fourcc, 30.0, framesize, isColor=True)
 
-while True:
-    # start time to compute the fps
-    start = datetime.datetime.now()
+    # load the pre-trained YOLOv8n model
+    model = YOLO("yolo11x.pt")
 
-    ret, frame = video_cap.read()
+    mot_tracker = Sort(max_age=500, min_hits=3, iou_threshold=0.7)
 
-    # if there are no more frames to process, break out of the loop
-    if not ret:
-        break
+    while True:
+        # start time to compute the fps
+        start = datetime.datetime.now()
 
-    frame = cv2.resize(frame, (1280, 720))
+        ret, frame = video_cap.read()
 
-    # run the YOLO model on the frame
-    detections = model(frame)[0]
+        # if there are no more frames to process, break out of the loop
+        if not ret:
+            break
 
-    # initialize the list of bounding boxes and confidences
-    results = []
+        frame = cv2.resize(frame, (1280, 720))
 
-    # loop over the detections
-    for data in detections.boxes.data.tolist():
-        # extract the confidence (i.e., probability) associated with the detection
-        confidence = data[4]
+        # run the YOLO model on the frame
+        detections = model(frame)[0]
 
-        # filter out weak detections by ensuring the
-        # confidence is greater than the minimum confidence
-        if float(confidence) < CONFIDENCE_THRESHOLD:
-            continue
+        # initialize the list of bounding boxes and confidences
+        results = []
 
-        # if the confidence is greater than the minimum confidence,
-        # draw the bounding box on the frame
-        xmin, ymin, xmax, ymax = int(data[0]), int(data[1]), int(data[2]), int(data[3])
-        class_id = int(data[5])
-        # add the bounding box (x, y, w, h), confidence and class id to the results list
-        results.append([xmin, ymin, xmax, ymax, confidence])
+        # loop over the detections
+        for data in detections.boxes.data.tolist():
+            # extract the confidence (i.e., probability) associated with the detection
+            confidence = data[4]
 
-    if len(results) == 0:
-        results = np.empty((0, 5))
-    else:
-        results = np.array(results)
+            # filter out weak detections by ensuring the
+            # confidence is greater than the minimum confidence
+            if float(confidence) < CONFIDENCE_THRESHOLD:
+                continue
 
-    # update the tracker with the new detections
-    track_bbs_ids = mot_tracker.update(results)
-    # loop over the tracks
-    for track in track_bbs_ids:
+            # if the confidence is greater than the minimum confidence,
+            # draw the bounding box on the frame
+            xmin, ymin, xmax, ymax = int(data[0]), int(data[1]), int(data[2]), int(data[3])
+            class_id = int(data[5])
+            # add the bounding box (x, y, w, h), confidence and class id to the results list
+            results.append([xmin, ymin, xmax, ymax, confidence])
 
-        # get the track id and the bounding box
-        track_id = track[4]
+        if len(results) == 0:
+            results = np.empty((0, 5))
+        else:
+            results = np.array(results)
 
-        xmin, ymin, xmax, ymax = int(track[0]), int(track[1]), int(track[2]), int(track[3])
+        # update the tracker with the new detections
+        track_bbs_ids = mot_tracker.update(results)
+        # loop over the tracks
+        for track in track_bbs_ids:
+            # get the track id and the bounding box
+            track_id = track[4]
 
-        # draw the bounding box and the track id
-        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), GREEN, 2)
-        cv2.rectangle(frame, (xmin, ymin - 20), (xmin + 20, ymin), GREEN, -1)
-        cv2.putText(frame, str(track_id), (xmin + 5, ymin - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 2)
+            xmin, ymin, xmax, ymax = int(track[0]), int(track[1]), int(track[2]), int(track[3])
 
+            # draw the bounding box and the track id
+            cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), GREEN, 2)
+            cv2.rectangle(frame, (xmin, ymin - 20), (xmin + 20, ymin), GREEN, -1)
+            cv2.putText(frame, str(track_id), (xmin + 5, ymin - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, WHITE, 2)
 
-    # end time to compute the fps
-    end = datetime.datetime.now()
-    # show the time it took to process 1 frame
-    total = (end - start).total_seconds()
-    print(f"Time to process 1 frame: {total * 1000:.0f} milliseconds")
+        # end time to compute the fps
+        end = datetime.datetime.now()
+        # show the time it took to process 1 frame
+        total = (end - start).total_seconds()
+        print(f"Time to process 1 frame: {total * 1000:.0f} milliseconds")
 
-    # calculate the frame per second and draw it on the frame
-    fps = f"FPS: {1 / total:.2f}"
-    cv2.putText(frame, fps, (50, 50),
-                cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 8)
+        # calculate the frame per second and draw it on the frame
+        fps = f"FPS: {1 / total:.2f}"
+        cv2.putText(frame, fps, (50, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 8)
 
-    # show the frame to our screen
-    cv2.imshow("Frame", frame)
-    writer.write(frame)
-    if cv2.waitKey(1) == ord("q"):
-        break
+        # show the frame to our screen
+        cv2.imshow("Frame", frame)
+        writer.write(frame)
+        if cv2.waitKey(1) == ord("q"):
+            break
 
-video_cap.release()
-writer.release()
-cv2.destroyAllWindows()
+    video_cap.release()
+    writer.release()
+    cv2.destroyAllWindows()
